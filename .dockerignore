@@ -1,0 +1,10 @@
+.git
+.github
+build*
+.cache
+.idea
+.vscode
+__pycache__
+*.pyc
+tests
+benchmarks

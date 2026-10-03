@@ -1,0 +1,47 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j 2
+      - name: Unit and API tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Benchmark correctness
+        run: ./build/search_benchmark 1000
+      - name: Install browser test dependencies
+        run: |
+          python3 -m pip install -r tests/requirements.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Browser tests
+        run: |
+          ./build/search_server > server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          python3 tests/browser_test.py http://127.0.0.1:8080
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build image
+        run: docker build -t document-search .
+      - name: Run container tests
+        run: |
+          docker run -d --name search-test -p 127.0.0.1:8080:8080 document-search
+          python3 tests/container_test.py http://127.0.0.1:8080
+      - name: Container logs
+        if: always()
+        run: docker logs search-test || true
+      - name: Stop container
+        if: always()
+        run: docker rm -f search-test || true
