@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Document Search Engine</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #202b34; background: #f7f8f9; font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 800px; margin: 64px auto; padding: 0 24px; }
+    h1 { margin-bottom: 4px; font-size: 30px; }
+    .intro, .status, .path { color: #596771; }
+    form { margin-top: 28px; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; }
+    .query { display: flex; gap: 8px; }
+    input, button, select { font: inherit; border: 1px solid #b9c4ca; border-radius: 5px; padding: 10px 12px; }
+    input { flex: 1; min-width: 0; background: white; }
+    button { color: white; background: #175f69; border-color: #175f69; cursor: pointer; }
+    button:disabled { opacity: .65; cursor: wait; }
+    .options { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+    .options label { margin: 0; font-size: 14px; }
+    select { padding: 5px 8px; background: white; }
+    .status { min-height: 26px; margin: 24px 0 12px; }
+    article { padding: 20px 0; border-top: 1px solid #dce1e5; }
+    article h2 { margin: 0 0 4px; font-size: 20px; }
+    a { color: #175f69; text-underline-offset: 3px; }
+    article p { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .path { font-size: 13px; overflow-wrap: anywhere; }
+    :focus-visible { outline: 3px solid #6096a1; outline-offset: 2px; }
+    @media (max-width: 480px) { main { margin-top: 32px; } h1 { font-size: 25px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Document Search Engine</h1>
+    <p class="intro">Search the indexed documents by keyword. Open a result to read the full text.</p>
+    <form id="search-form">
+      <label for="query">Search documents</label>
+      <div class="query">
+        <input id="query" name="q" placeholder="Try database locking" required maxlength="512" autocomplete="off">
+        <button id="submit" type="submit">Search</button>
+      </div>
+      <div class="options">
+        <label for="mode">Match</label>
+        <select id="mode"><option value="any">Any word</option><option value="all">Every word</option></select>
+      </div>
+    </form>
+    <p class="status" id="status" role="status">Enter a query to get started.</p>
+    <section id="results" aria-label="Search results"></section>
+  </main>
+  <script>
+    const form = document.querySelector('#search-form');
+    const query = document.querySelector('#query');
+    const mode = document.querySelector('#mode');
+    const button = document.querySelector('#submit');
+    const status = document.querySelector('#status');
+    const results = document.querySelector('#results');
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (button.disabled) return;
+      button.disabled = true;
+      status.textContent = 'Searching...';
+      results.replaceChildren();
+      try {
+        const parameters = new URLSearchParams({ q: query.value, mode: mode.value, limit: '10' });
+        const response = await fetch(`/search?${parameters}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Search failed.');
+        status.textContent = data.total
+          ? `${data.total} matches · showing ${data.results.length} · ${data.elapsed_ms.toFixed(2)} ms`
+          : 'No matching documents. Try fewer or different words.';
+        for (const result of data.results) {
+          const article = document.createElement('article');
+          const heading = document.createElement('h2');
+          const link = document.createElement('a');
+          link.textContent = result.title;
+          link.href = `/document?${new URLSearchParams({ id: result.id })}`;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          heading.append(link);
+          const path = document.createElement('div');
+          path.className = 'path';
+          path.textContent = `${result.id} · score ${result.score.toFixed(3)}`;
+          const preview = document.createElement('p');
+          preview.textContent = result.preview;
+          article.append(heading, path, preview);
+          results.append(article);
+        }
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
