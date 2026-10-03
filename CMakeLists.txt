@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(document_search VERSION 1.0 LANGUAGES CXX)
 
+option(BUILD_BENCHMARKS "Build the search benchmark" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -33,6 +35,11 @@ add_executable(search_server src/server.cpp)
 target_link_libraries(search_server PRIVATE search_core httplib::httplib nlohmann_json::nlohmann_json)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(search_server PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(BUILD_BENCHMARKS)
+    add_executable(search_benchmark benchmarks/search_benchmark.cpp)
+    target_link_libraries(search_benchmark PRIVATE search_core)
 endif()
 
 if(BUILD_TESTING)
