@@ -1,0 +1,8 @@
+Database backups
+
+A backup protects database contents from accidental deletion or hardware failure.
+Schedule backups, keep copies away from the primary server, and test restoration.
+A backup is only useful when it can actually be restored.
+
+Recovery time describes how long restoration takes. Recovery point describes how
+much recent data can be lost. Transaction logs can support point in time recovery.
