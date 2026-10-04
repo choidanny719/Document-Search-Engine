@@ -1,3 +1,4 @@
+import json
 import sys
 import time
 import urllib.error
@@ -49,6 +50,45 @@ with sync_playwright() as playwright:
     search('!!!')
     expect(page.get_by_role('status')).to_contain_text('q must contain a word')
 
+    page.route('**/search?*', lambda route: route.abort('failed'))
+    search('database locking')
+    expect(page.get_by_role('status')).to_contain_text('Failed to fetch')
+    expect(page.locator('article')).to_have_count(0)
+    page.unroute('**/search?*')
+    search('database locking', 'all')
+    expect(page.locator('article')).to_have_count(1)
+
+    for body, message in [(json.dumps({'error': 'Temporarily unavailable'}), 'Temporarily unavailable'),
+                          (json.dumps({}), 'Search failed.')]:
+        page.route('**/search?*', lambda route: route.fulfill(
+            status=503, content_type='application/json', body=body))
+        search('database locking')
+        expect(page.get_by_role('status')).to_have_text(message)
+        expect(page.locator('article')).to_have_count(0)
+        page.unroute('**/search?*')
+
+    page.route('**/search?*', lambda route: route.fulfill(
+        status=200, content_type='application/json', body='invalid json'))
+    search('database locking')
+    expect(page.get_by_role('status')).not_to_have_text('Searching...')
+    expect(page.get_by_role('status')).not_to_be_empty()
+    expect(page.locator('article')).to_have_count(0)
+    page.unroute('**/search?*')
+
+    markup = '<img src=x onerror="window.injected=true">'
+    result = {'total': 1, 'elapsed_ms': 1, 'results': [
+        {'id': 'nested/a &+#?.md', 'title': markup, 'preview': markup, 'score': 1}]}
+    page.route('**/search?*', lambda route: route.fulfill(
+        status=200, content_type='application/json', body=json.dumps(result)))
+    search('markup')
+    expect(page.locator('article h2 a')).to_have_text(markup)
+    expect(page.locator('article p')).to_have_text(markup)
+    expect(page.locator('article img')).to_have_count(0)
+    assert page.evaluate('window.injected === undefined')
+    assert page.locator('article a').evaluate(
+        "link => new URL(link.href).searchParams.get('id')") == 'nested/a &+#?.md'
+    page.unroute('**/search?*')
+
     page.set_viewport_size({'width': 390, 'height': 844})
     search('database locking', 'all')
     expect(page.locator('article')).to_have_count(1)
@@ -56,4 +96,4 @@ with sync_playwright() as playwright:
     assert not errors, errors
     browser.close()
 
-print('Browser checks passed: search, filters, document links, errors, and mobile layout')
+print('Browser checks passed: search, links, failure recovery, safe rendering, and mobile layout')
