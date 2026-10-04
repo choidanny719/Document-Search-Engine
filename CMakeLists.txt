@@ -58,4 +58,8 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/api_test.py
                 $<TARGET_FILE:search_server> ${CMAKE_CURRENT_SOURCE_DIR}/web)
     set_tests_properties(api_integration PROPERTIES TIMEOUT 45)
+    add_test(NAME startup_integration
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_test.py
+                $<TARGET_FILE:search_server> ${CMAKE_CURRENT_SOURCE_DIR}/web)
+    set_tests_properties(startup_integration PROPERTIES TIMEOUT 45)
 endif()
