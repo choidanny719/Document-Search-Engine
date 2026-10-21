@@ -149,6 +149,94 @@ class ApiTest(ServerTestCase):
                 self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
                 self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
 
+    def test_query_normalization_preserves_the_original_response_query(self):
+        query = ' \tDATABASE---ROW+locking!\n'
+        status, body, headers = self.search(q=query, mode='all')
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {'query', 'mode', 'total', 'elapsed_ms', 'results'})
+        self.assertEqual(body['query'], query)
+        self.assertEqual(body['mode'], 'all')
+        self.assertEqual(body['total'], 1)
+        self.assertEqual(len(body['results']), 1)
+        hit = body['results'][0]
+        self.assertEqual(set(hit), {'id', 'title', 'score', 'preview'})
+        self.assertEqual(hit['id'], 'a.txt')
+        self.assertEqual(hit['title'], 'a')
+        self.assertAlmostEqual(hit['score'], 1.0, places=12)
+        self.assertEqual(hit['preview'], self.documents['a.txt'])
+        self.assertIn('application/json', headers['Content-Type'])
+
+    def test_defaults_and_unknown_parameters_preserve_search_results(self):
+        _, expected, _ = self.search(q='database')
+        status, actual, _ = self.search(q='database', mode='any', limit='010', unused='ignored')
+        self.assertEqual(status, 200)
+        self.assertEqual(expected['mode'], 'any')
+        for key in ['query', 'mode', 'total', 'results']:
+            self.assertEqual(actual[key], expected[key])
+
+    def test_parameter_errors_follow_query_mode_then_limit_validation(self):
+        cases = [
+            ({'q': '!', 'mode': 'bad', 'limit': 'bad'},
+             'q must contain a word and be at most 512 bytes'),
+            ({'q': 'database', 'mode': 'bad', 'limit': 'bad'}, 'mode must be any or all'),
+            ({'q': 'database', 'mode': 'any', 'limit': 'bad'},
+             'limit must be an integer between 1 and 100'),
+        ]
+        for parameters, expected in cases:
+            with self.subTest(parameters=parameters):
+                status, body, _ = self.search(**parameters)
+                self.assertEqual(status, 400)
+                self.assertEqual(body, {'error': expected})
+        for mode in ['', 'ANY', 'All', ' any', 'all ']:
+            with self.subTest(mode=mode):
+                self.assertEqual(self.search(q='database', mode=mode)[0], 400)
+        for limit in ['+1', ' 1', '1 ', '1.0', '1e1', '0x10', '\t1', '1\x00']:
+            with self.subTest(limit=limit):
+                self.assertEqual(self.search(q='database', limit=limit)[0], 400)
+
+    def test_repeated_parameters_use_the_first_value(self):
+        status, body, _ = self.request('/search?' + urllib.parse.urlencode([
+            ('q', 'database'), ('q', 'missing'), ('mode', 'all'), ('mode', 'bad'),
+            ('limit', '1'), ('limit', 'bad')]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body['query'], 'database')
+        self.assertEqual(body['mode'], 'all')
+        self.assertEqual(body['total'], 2)
+        self.assertEqual(len(body['results']), 1)
+        self.assertEqual(self.request('/search?q=&q=database')[0], 400)
+        status, text, _ = self.request('/document?id=a.txt&id=missing.txt')
+        self.assertEqual(status, 200)
+        self.assertEqual(text, self.documents['a.txt'])
+
+    def test_errors_keep_json_security_headers_and_head_has_no_body(self):
+        for path, expected in [('/search?q=!', 400), ('/document?id=missing.txt', 404), ('/missing', 404)]:
+            with self.subTest(path=path):
+                status, body, headers = self.request(path)
+                self.assertEqual(status, expected)
+                self.assertEqual(set(body), {'error'})
+                self.assertIn('application/json', headers['Content-Type'])
+                self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
+                status, body, headers = self.request(path, method='HEAD')
+                self.assertEqual(status, expected)
+                self.assertEqual(body, '')
+                self.assertIn('application/json', headers['Content-Type'])
+
+    def test_mixed_concurrent_requests_do_not_share_response_state(self):
+        paths = ['/health', '/document?id=b.md', '/search?q=database&limit=1',
+                 '/search?q=database+locking&mode=all', '/search?q=missing', '/search?q=!']
+        expected = [self.request(path)[:2] for path in paths]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            responses = list(pool.map(self.request, paths * 10))
+        for number, (status, body, _) in enumerate(responses):
+            expected_status, expected_body = expected[number % len(paths)]
+            self.assertEqual(status, expected_status)
+            if isinstance(body, dict) and 'elapsed_ms' in body:
+                self.assertGreaterEqual(body['elapsed_ms'], 0)
+                body = {key: value for key, value in body.items() if key != 'elapsed_ms'}
+                expected_body = {key: value for key, value in expected_body.items() if key != 'elapsed_ms'}
+            self.assertEqual(body, expected_body)
+
 
 class ApiBoundaryTest(ServerTestCase):
     documents = {
@@ -212,6 +300,55 @@ class ApiBoundaryTest(ServerTestCase):
                 status, body, _ = self.search(q=query)
                 self.assertEqual(status, 200)
                 self.assertEqual(body['results'][0]['preview'], expected)
+
+    def test_document_lookup_preserves_invalid_utf8_bytes(self):
+        with urllib.request.urlopen(self.base + '/document?id=invalid.txt', timeout=3) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), self.documents['invalid.txt'])
+            self.assertIn('text/plain', response.headers['Content-Type'])
+
+    def test_document_ids_are_not_normalized_as_filesystem_paths(self):
+        for identifier in ['./empty.txt', 'EMPTY.TXT', 'nested/../empty.txt', '%2e%2e/empty.txt']:
+            with self.subTest(identifier=identifier):
+                path = '/document?' + urllib.parse.urlencode({'id': identifier})
+                status, body, _ = self.request(path)
+                self.assertEqual(status, 404)
+                self.assertEqual(body, {'error': 'Document not found'})
+
+
+class CorpusSnapshotApiTest(ServerTestCase):
+    documents = {'kept.txt': 'original snapshot', 'deleted.txt': 'retained content'}
+
+    def test_file_changes_do_not_modify_the_running_index(self):
+        root = Path(self.folder.name)
+        (root / 'kept.txt').write_text('changed replacement', encoding='utf-8')
+        (root / 'deleted.txt').unlink()
+        (root / 'added.txt').write_text('new arrival', encoding='utf-8')
+        status, body, _ = self.request('/health')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {'status': 'ok', 'documents': 2, 'terms': 4})
+        for identifier, text in self.documents.items():
+            with self.subTest(identifier=identifier):
+                status, body, _ = self.request('/document?' + urllib.parse.urlencode({'id': identifier}))
+                self.assertEqual(status, 200)
+                self.assertEqual(body, text)
+        self.assertEqual(self.request('/document?id=added.txt')[0], 404)
+        self.assertEqual(self.search(q='changed new')[1]['total'], 0)
+        self.assertEqual(self.search(q='original retained')[1]['total'], 2)
+
+
+class LargeDocumentApiTest(ServerTestCase):
+    documents = {'large.txt': 'payload ' * (1024 * 1024 // 8)}
+
+    def test_retrieves_a_full_sized_document_with_a_bounded_search_preview(self):
+        status, text, headers = self.request('/document?id=large.txt')
+        self.assertEqual(status, 200)
+        self.assertEqual(text, self.documents['large.txt'])
+        self.assertEqual(int(headers['Content-Length']), 1024 * 1024)
+        status, body, _ = self.search(q='payload')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['total'], 1)
+        self.assertEqual(body['results'][0]['preview'], self.documents['large.txt'][:200] + '...')
 
 
 class EmptyCorpusApiTest(ServerTestCase):
