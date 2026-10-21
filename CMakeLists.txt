@@ -31,9 +31,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(search_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(search_http src/http.cpp)
+target_link_libraries(search_http PUBLIC search_core httplib::httplib nlohmann_json::nlohmann_json)
 add_executable(search_server src/server.cpp)
-target_link_libraries(search_server PRIVATE search_core httplib::httplib nlohmann_json::nlohmann_json)
+target_link_libraries(search_server PRIVATE search_http)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(search_http PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(search_server PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
