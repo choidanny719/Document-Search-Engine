@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
+#include <limits>
 
 using search::Document;
 using search::Index;
@@ -150,4 +151,60 @@ TEST(Index, RankingDoesNotDependOnDocumentOrQueryWordOrder) {
             }
         }
     }
+}
+
+TEST(Index, SearchesCompleteBodyTokensWithoutIndexingTitlesOrIdentifiers) {
+    const Index index({{"identifier", "headline", "lock HTTP2 404"},
+                       {"second", "Other", "locking lockout http"}});
+    EXPECT_TRUE(index.search("identifier headline").hits.empty());
+    EXPECT_EQ(index.match("LOCK", MatchMode::Any), (std::vector<std::size_t>{0}));
+    EXPECT_EQ(index.match("locking", MatchMode::Any), (std::vector<std::size_t>{1}));
+    EXPECT_EQ(index.match("http2/404", MatchMode::All), (std::vector<std::size_t>{0}));
+    EXPECT_EQ(index.match("http", MatchMode::Any), (std::vector<std::size_t>{1}));
+}
+
+TEST(Index, KeepsEmptyAndPunctuationOnlyDocumentsAvailableForLookup) {
+    const Index index({{"empty", "Empty", ""}, {"punctuation", "Punctuation", " !\n\t?"}});
+    EXPECT_EQ(index.termCount(), 0);
+    ASSERT_EQ(index.documents().size(), 2);
+    ASSERT_NE(index.find("empty"), nullptr);
+    ASSERT_NE(index.find("punctuation"), nullptr);
+    EXPECT_EQ(index.find("punctuation")->text, " !\n\t?");
+    for (const auto mode : {MatchMode::Any, MatchMode::All}) {
+        for (const auto query : {"", "!!!", "missing"}) {
+            EXPECT_TRUE(index.match(query, mode).empty());
+            const auto results = index.search(query, 10, mode);
+            EXPECT_EQ(results.total, 0);
+            EXPECT_TRUE(results.hits.empty());
+        }
+    }
+}
+
+TEST(Index, RejectsZeroLimitsBeforeMatchingAndAcceptsOversizedLimits) {
+    const Index empty({});
+    const Index index({{"a", "A", "alpha"}, {"b", "B", "alpha beta"}});
+    for (const auto mode : {MatchMode::Any, MatchMode::All}) {
+        for (const auto query : {"", "!!!", "missing", "alpha"}) {
+            EXPECT_THROW(empty.search(query, 0, mode), std::invalid_argument);
+            EXPECT_THROW(index.search(query, 0, mode), std::invalid_argument);
+        }
+        const auto result = index.search("alpha", std::numeric_limits<std::size_t>::max(), mode);
+        EXPECT_EQ(result.total, 2);
+        EXPECT_EQ(result.hits.size(), 2);
+    }
+}
+
+TEST(Index, LooksUpExactCaseSensitiveIdentifiers) {
+    const Index index({{"a.txt", "A", "alpha"}, {"A.txt", "B", "beta"},
+                       {"nested/a.txt", "C", "gamma"}});
+    ASSERT_NE(index.find("a.txt"), nullptr);
+    ASSERT_NE(index.find("A.txt"), nullptr);
+    EXPECT_EQ(index.find("a.txt")->text, "alpha");
+    EXPECT_EQ(index.find("A.txt")->text, "beta");
+    EXPECT_EQ(index.find("a"), nullptr);
+    EXPECT_EQ(index.find("./a.txt"), nullptr);
+    EXPECT_EQ(index.find("nested/../a.txt"), nullptr);
+    EXPECT_EQ(index.find(""), nullptr);
+    const std::string wrapped = "!nested/a.txt?";
+    ASSERT_NE(index.find(std::string_view(wrapped).substr(1, 12)), nullptr);
 }

@@ -57,6 +57,21 @@ class StartupTest(unittest.TestCase):
     def test_rejects_an_invalid_bind_address(self):
         self.assert_failure('Could not bind the server port', '--host', '256.256.256.256', '--port', '0')
 
+    def test_rejects_binary_and_oversized_corpora_before_listening(self):
+        path = self.data / 'example.txt'
+        for content, message in [(b'prefix\x00suffix', 'Document contains binary data'),
+                                 (b'x' * (1024 * 1024 + 1), 'Document size limit exceeded')]:
+            with self.subTest(message=message):
+                path.write_bytes(content)
+                self.assert_failure(message, '--port', '0')
+
+    def test_help_does_not_require_existing_data_or_web_directories(self):
+        result = self.run_server('--data', str(self.root / 'missing-data'),
+                                 '--web', str(self.root / 'missing-web'), '--help')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('search_server [--data directory]', result.stdout)
+        self.assertEqual(result.stderr, '')
+
 
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]], verbosity=2)

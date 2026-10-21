@@ -134,3 +134,55 @@ TEST_F(CorpusTest, RejectsUnreadableDocuments) {
     }
     EXPECT_THROW(search::loadCorpus(directory), std::runtime_error);
 }
+
+TEST_F(CorpusTest, FiltersExtensionsBeforeReadingUnsupportedFiles) {
+    write("kept.md", "search");
+    write("upper.TXT", "ignored");
+    write("mixed.Md", "ignored");
+    write("no-extension", "ignored");
+    write("backup.txt.bak", "ignored");
+    write("large.csv", std::string(1024 * 1024 + 1, '\0'));
+    const auto documents = search::loadCorpus(directory);
+    ASSERT_EQ(documents.size(), 1);
+    EXPECT_EQ(documents.front().id, "kept.md");
+}
+
+TEST_F(CorpusTest, DistinguishesIdenticalFilenamesInDifferentDirectories) {
+    write("z/report.txt", "second");
+    write("a/report.txt", "first");
+    const auto documents = search::loadCorpus(directory);
+    ASSERT_EQ(documents.size(), 2);
+    EXPECT_EQ(documents[0].id, "a/report.txt");
+    EXPECT_EQ(documents[1].id, "z/report.txt");
+    EXPECT_EQ(documents[0].title, "report");
+    EXPECT_EQ(documents[1].title, "report");
+    EXPECT_EQ(documents[0].text, "first");
+    EXPECT_EQ(documents[1].text, "second");
+}
+
+TEST_F(CorpusTest, PreservesLineEndingsWhitespaceAndNonNullBytes) {
+    const std::string text = "\xEF\xBB\xBF  caf\xC3\xA9\r\n\ttext\xff \n";
+    write("bytes.txt", text);
+    const auto documents = search::loadCorpus(directory);
+    ASSERT_EQ(documents.size(), 1);
+    EXPECT_EQ(documents.front().text, text);
+}
+
+TEST_F(CorpusTest, RejectsNullBytesAtEveryPosition) {
+    for (std::size_t position = 0; position < 5; ++position) {
+        SCOPED_TRACE(position);
+        std::string text = "abcde";
+        text[position] = '\0';
+        write("binary.txt", text);
+        EXPECT_THROW(search::loadCorpus(directory), std::runtime_error);
+    }
+}
+
+TEST_F(CorpusTest, TraversesDirectoriesWithDocumentExtensions) {
+    write("folder.md/nested.txt", "nested document");
+    std::filesystem::create_directory(directory / "empty.txt");
+    const auto documents = search::loadCorpus(directory);
+    ASSERT_EQ(documents.size(), 1);
+    EXPECT_EQ(documents.front().id, "folder.md/nested.txt");
+    EXPECT_EQ(documents.front().text, "nested document");
+}
