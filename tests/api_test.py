@@ -1,4 +1,5 @@
 import concurrent.futures
+import http.client
 import json
 from pathlib import Path
 import re
@@ -237,6 +238,56 @@ class ApiTest(ServerTestCase):
                 expected_body = {key: value for key, value in expected_body.items() if key != 'elapsed_ms'}
             self.assertEqual(body, expected_body)
 
+    def test_http_client_reconnects_after_errors_and_reuses_successful_connections(self):
+        address = urllib.parse.urlsplit(self.base)
+        connection = http.client.HTTPConnection(address.hostname, address.port, timeout=3)
+        self.addCleanup(connection.close)
+        cases = [
+            ('/search?q=database&limit=1', 200, 'total', 2),
+            ('/search?q=database&limit=0', 400, 'error', 'limit must be an integer between 1 and 100'),
+            ('/document?id=missing.txt', 404, 'error', 'Document not found'),
+            ('/search?q=locking&mode=all', 200, 'total', 1),
+            ('/health', 200, 'status', 'ok'),
+        ]
+        for path, status, key, expected in cases:
+            with self.subTest(path=path):
+                connection.request('GET', path)
+                request_socket = connection.sock
+                response = connection.getresponse()
+                body = json.loads(response.read())
+                self.assertEqual(response.status, status)
+                self.assertEqual(body[key], expected)
+                if status == 200:
+                    self.assertIs(connection.sock, request_socket)
+                else:
+                    self.assertEqual(response.getheader('Connection'), 'close')
+                    self.assertIsNone(connection.sock)
+
+    def test_request_body_size_limit_and_recovery(self):
+        for size, expected_status in [(1024, 200), (1025, 413)]:
+            with self.subTest(size=size):
+                status, body, headers = self.request('/search?q=database', data=b'x' * size)
+                self.assertEqual(status, expected_status)
+                self.assertIn('application/json', headers['Content-Type'])
+                self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                if expected_status == 200:
+                    self.assertEqual(body['total'], 2)
+                else:
+                    self.assertEqual(body, {'error': 'Request failed'})
+        self.assertEqual(self.search(q='locking')[1]['total'], 1)
+
+    def test_queries_without_ascii_words_are_rejected(self):
+        for query in [' \t\r\n', '\x00', 'é', '中文', '🙂']:
+            with self.subTest(query=query):
+                status, body, _ = self.search(q=query)
+                self.assertEqual(status, 400)
+                self.assertEqual(body, {'error': 'q must contain a word and be at most 512 bytes'})
+        query = 'database\x00élocking'
+        status, body, _ = self.search(q=query, mode='all')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['query'], query)
+        self.assertEqual([hit['id'] for hit in body['results']], ['a.txt'])
+
 
 class ApiBoundaryTest(ServerTestCase):
     documents = {
@@ -249,6 +300,11 @@ class ApiBoundaryTest(ServerTestCase):
         'unicode.txt': 'unicode ' + 'a' * 191 + 'é',
         'invalid.txt': b'encoding \xff value',
         'markup.txt': '<script>alert("example")</script>',
+        'nested/café-资料.md': 'international filename',
+        'literal%2Fname.txt': 'literal percent filename',
+        'literal/name.txt': 'nested slash filename',
+        'padded.txt': ' \t\r\n' * 100 + 'padding' + ' \t\r\n' * 100 + 'tail',
+        'collapsed.txt': 'compressed ' + 'a' * 188 + '\t\n  tail',
     }
 
     def test_query_byte_boundaries(self):
@@ -315,6 +371,32 @@ class ApiBoundaryTest(ServerTestCase):
                 self.assertEqual(status, 404)
                 self.assertEqual(body, {'error': 'Document not found'})
 
+    def test_unicode_identifiers_survive_search_and_document_lookup(self):
+        status, body, _ = self.search(q='international')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['total'], 1)
+        hit = body['results'][0]
+        self.assertEqual(hit['id'], 'nested/café-资料.md')
+        self.assertEqual(hit['title'], 'café 资料')
+        status, body, _ = self.request('/document?' + urllib.parse.urlencode({'id': hit['id']}))
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.documents[hit['id']])
+
+    def test_percent_encoded_identifiers_are_decoded_once(self):
+        for identifier in ['literal%2Fname.txt', 'literal/name.txt']:
+            with self.subTest(identifier=identifier):
+                status, body, _ = self.request('/document?' + urllib.parse.urlencode({'id': identifier}))
+                self.assertEqual(status, 200)
+                self.assertEqual(body, self.documents[identifier])
+
+    def test_preview_limit_applies_after_whitespace_collapsing(self):
+        for query, preview in [('padding', 'padding tail'),
+                               ('compressed', 'compressed ' + 'a' * 188 + ' ...')]:
+            with self.subTest(query=query):
+                status, body, _ = self.search(q=query)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['results'][0]['preview'], preview)
+
 
 class CorpusSnapshotApiTest(ServerTestCase):
     documents = {'kept.txt': 'original snapshot', 'deleted.txt': 'retained content'}
@@ -364,6 +446,24 @@ class EmptyCorpusApiTest(ServerTestCase):
             self.assertEqual(body['total'], 0)
             self.assertEqual(body['results'], [])
         self.assertEqual(self.request('/document?id=missing.txt')[0], 404)
+
+
+class UnsearchableCorpusApiTest(ServerTestCase):
+    documents = {'empty.txt': '', 'symbols.md': ' \t\n!!! é 中文'}
+
+    def test_documents_without_indexed_terms_remain_readable(self):
+        status, body, _ = self.request('/health')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {'status': 'ok', 'documents': 2, 'terms': 0})
+        for mode in ['any', 'all']:
+            status, body, _ = self.search(q='anything', mode=mode)
+            self.assertEqual(status, 200)
+            self.assertEqual(body['total'], 0)
+            self.assertEqual(body['results'], [])
+        for identifier, expected in self.documents.items():
+            status, text, _ = self.request('/document?' + urllib.parse.urlencode({'id': identifier}))
+            self.assertEqual(status, 200)
+            self.assertEqual(text, expected)
 
 
 if __name__ == '__main__':
