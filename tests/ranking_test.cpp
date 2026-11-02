@@ -69,36 +69,13 @@ std::vector<search::SearchHit> referenceRanking(const std::vector<search::Docume
     return matches;
 }
 
-}
-
-TEST(Ranking, MatchesAnIndependentDenseCalculationForBothModesAndLimits) {
-    std::mt19937 random(7319);
-    std::vector<search::Document> documents;
-    std::vector<Counts> frequencies;
-    for (unsigned id = 0; id < 48; ++id) {
-        Counts counts(vocabulary.size(), 0);
-        if (id % 11 != 0) {
-            for (std::size_t term = 0; term + 1 < counts.size(); ++term) counts[term] = random() % 6;
-        }
-        documents.push_back({"document-" + std::to_string(48 - id), "Document", textFor(counts)});
-        frequencies.push_back(std::move(counts));
-    }
+void expectRanking(const std::vector<search::Document>& documents,
+                   const std::vector<Counts>& frequencies, const std::vector<Counts>& queries,
+                   const std::vector<std::size_t>& limits) {
     const search::Index index(documents);
-    std::vector<Counts> queries{
-        Counts(vocabulary.size(), 0),
-        {1, 0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0, 1},
-        {2, 1, 0, 0, 0, 0, 0, 0, 1},
-        {1, 1, 1, 1, 1, 1, 1, 1, 0}
-    };
-    for (unsigned number = 0; number < 12; ++number) {
-        Counts query(vocabulary.size(), 0);
-        for (auto& count : query) count = random() % 4;
-        queries.push_back(std::move(query));
-    }
     for (const auto& query : queries) {
         const auto text = textFor(query);
-        SCOPED_TRACE(text);
+        SCOPED_TRACE(text.substr(0, 200));
         for (const auto mode : {search::MatchMode::Any, search::MatchMode::All}) {
             SCOPED_TRACE(mode == search::MatchMode::All ? "all" : "any");
             const auto expected = referenceRanking(documents, frequencies, query, mode);
@@ -106,7 +83,7 @@ TEST(Ranking, MatchesAnIndependentDenseCalculationForBothModesAndLimits) {
             for (const auto& hit : expected) identifiers.push_back(hit.document);
             std::sort(identifiers.begin(), identifiers.end());
             EXPECT_EQ(index.match(text, mode), identifiers);
-            for (const std::size_t limit : {1, 3, 10, 48, 100}) {
+            for (const auto limit : limits) {
                 SCOPED_TRACE(limit);
                 const auto actual = index.search(text, limit, mode);
                 EXPECT_EQ(actual.total, expected.size());
@@ -121,4 +98,76 @@ TEST(Ranking, MatchesAnIndependentDenseCalculationForBothModesAndLimits) {
             }
         }
     }
+}
+
+}
+
+TEST(Ranking, MatchesAnIndependentDenseCalculationForBothModesAndLimits) {
+    std::mt19937 random(7319);
+    std::vector<search::Document> documents;
+    std::vector<Counts> frequencies;
+    for (unsigned id = 0; id < 48; ++id) {
+        Counts counts(vocabulary.size(), 0);
+        if (id % 11 != 0) {
+            for (std::size_t term = 0; term + 1 < counts.size(); ++term) counts[term] = random() % 6;
+        }
+        documents.push_back({"document-" + std::to_string(48 - id), "Document", textFor(counts)});
+        frequencies.push_back(std::move(counts));
+    }
+    std::vector<Counts> queries{
+        Counts(vocabulary.size(), 0),
+        {1, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 1},
+        {2, 1, 0, 0, 0, 0, 0, 0, 1},
+        {1, 1, 1, 1, 1, 1, 1, 1, 0}
+    };
+    for (unsigned number = 0; number < 12; ++number) {
+        Counts query(vocabulary.size(), 0);
+        for (auto& count : query) count = random() % 4;
+        queries.push_back(std::move(query));
+    }
+    expectRanking(documents, frequencies, queries, {1, 3, 10, 48, 100});
+}
+
+TEST(Ranking, HandlesSparsePostingsAndHighlyUnevenTermFrequencies) {
+    std::vector<search::Document> documents;
+    std::vector<Counts> frequencies;
+    for (unsigned id = 0; id < 128; ++id) {
+        Counts counts(vocabulary.size(), 0);
+        counts[0] = id + 1;
+        if (id == 17 || id == 119) counts[1] = 8192;
+        if (id == 91 || id == 119) counts[2] = 1;
+        documents.push_back({"document-" + std::to_string(128 - id), "Document", textFor(counts)});
+        frequencies.push_back(std::move(counts));
+    }
+    documents.push_back({"empty", "Empty", ""});
+    frequencies.emplace_back(vocabulary.size(), 0);
+    const std::vector<Counts> queries{
+        {1, 1, 0, 0, 0, 0, 0, 0, 0},
+        {0, 1, 1, 0, 0, 0, 0, 0, 0},
+        {1, 8192, 1, 0, 0, 0, 0, 0, 0},
+        {0, 1, 1, 0, 0, 0, 0, 0, 1}
+    };
+    expectRanking(documents, frequencies, queries, {1, 2, 3, 127, 128, 129});
+}
+
+TEST(Ranking, KeepsCloseScoresAheadOfLexicographicTieBreaking) {
+    const std::vector<Counts> frequencies{
+        {10000, 1, 0, 0, 0, 0, 0, 0, 0},
+        {10001, 1, 0, 0, 0, 0, 0, 0, 0},
+        {1, 0, 0, 0, 0, 0, 0, 0, 0}
+    };
+    const std::vector<search::Document> documents{
+        {"a", "Lower", textFor(frequencies[0])},
+        {"z", "Higher", textFor(frequencies[1])},
+        {"m", "Exact", textFor(frequencies[2])}
+    };
+    expectRanking(documents, frequencies, {{1, 0, 0, 0, 0, 0, 0, 0, 0}}, {1, 2, 3, 4});
+    const auto result = search::Index(documents).search("alpha", 3);
+    ASSERT_EQ(result.hits.size(), 3);
+    EXPECT_EQ(result.hits[0].document, 2);
+    EXPECT_EQ(result.hits[1].document, 1);
+    EXPECT_EQ(result.hits[2].document, 0);
+    EXPECT_GT(result.hits[1].score - result.hits[2].score, 0);
+    EXPECT_LT(result.hits[1].score - result.hits[2].score, 1e-6);
 }
