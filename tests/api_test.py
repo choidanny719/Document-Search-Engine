@@ -2,71 +2,12 @@ import concurrent.futures
 import http.client
 import json
 from pathlib import Path
-import re
-import select
-import subprocess
 import sys
-import tempfile
-import time
 import unittest
-import urllib.error
 import urllib.parse
 import urllib.request
 
-
-class ServerTestCase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.folder = tempfile.TemporaryDirectory()
-        cls.addClassCleanup(cls.folder.cleanup)
-        root = Path(cls.folder.name)
-        for name, text in cls.documents.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(text if isinstance(text, bytes) else text.encode('utf-8'))
-        cls.process = subprocess.Popen(
-            [sys.argv[1], '--data', str(root), '--web', sys.argv[2], '--port', '0'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        cls.addClassCleanup(cls.stop_server)
-        if not select.select([cls.process.stdout], [], [], 20)[0]:
-            raise RuntimeError('Server did not report its listening address')
-        line = cls.process.stdout.readline()
-        match = re.search(r'http://127\.0\.0\.1:(\d+)', line)
-        if not match:
-            raise RuntimeError(f'Server failed to start: {line} {cls.process.stderr.read()}')
-        cls.base = f'http://127.0.0.1:{match.group(1)}'
-        for _ in range(100):
-            try:
-                cls.request('/health')
-                return
-            except (urllib.error.URLError, TimeoutError):
-                time.sleep(0.02)
-        raise RuntimeError('Server did not become ready')
-
-    @classmethod
-    def stop_server(cls):
-        cls.process.terminate()
-        try:
-            cls.process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            cls.process.kill()
-            cls.process.communicate()
-
-    @classmethod
-    def request(cls, path, method='GET', data=None):
-        request = urllib.request.Request(cls.base + path, data=data, method=method)
-        try:
-            response = urllib.request.urlopen(request, timeout=3)
-        except urllib.error.HTTPError as error:
-            response = error
-        with response:
-            body = response.read().decode('utf-8')
-            if body and 'application/json' in response.headers.get('Content-Type', ''):
-                body = json.loads(body)
-            return response.status, body, response.headers
-
-    def search(self, **parameters):
-        return self.request('/search?' + urllib.parse.urlencode(parameters))
+from server_support import ServerTestCase
 
 
 class ApiTest(ServerTestCase):

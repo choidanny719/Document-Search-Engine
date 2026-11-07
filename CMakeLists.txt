@@ -57,12 +57,10 @@ if(BUILD_TESTING)
     include(GoogleTest)
     gtest_discover_tests(search_tests)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    add_test(NAME api_integration
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/api_test.py
-                $<TARGET_FILE:search_server> ${CMAKE_CURRENT_SOURCE_DIR}/web)
-    set_tests_properties(api_integration PROPERTIES TIMEOUT 45)
-    add_test(NAME startup_integration
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_test.py
-                $<TARGET_FILE:search_server> ${CMAKE_CURRENT_SOURCE_DIR}/web)
-    set_tests_properties(startup_integration PROPERTIES TIMEOUT 45)
+    foreach(suite IN ITEMS api startup transport)
+        add_test(NAME ${suite}_integration
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${suite}_test.py
+                    $<TARGET_FILE:search_server> ${CMAKE_CURRENT_SOURCE_DIR}/web)
+        set_tests_properties(${suite}_integration PROPERTIES TIMEOUT 45)
+    endforeach()
 endif()
