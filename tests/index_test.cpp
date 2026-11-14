@@ -208,3 +208,58 @@ TEST(Index, LooksUpExactCaseSensitiveIdentifiers) {
     const std::string wrapped = "!nested/a.txt?";
     ASSERT_NE(index.find(std::string_view(wrapped).substr(1, 12)), nullptr);
 }
+
+TEST(Index, MatchesOnlyTheBytesInsideTheQueryView) {
+    const Index index({{"target", "", "alpha alpha beta99"}, {"prefix", "", "prealpha"},
+                       {"suffix", "", "beta99post"}, {"partial", "", "beta99"}});
+    constexpr std::string_view buffer = "prealpha ALPHA/beta99post";
+    const auto query = buffer.substr(3, buffer.size() - 7);
+    EXPECT_EQ(index.match(query, MatchMode::Any), (std::vector<std::size_t>{0, 3}));
+    EXPECT_EQ(index.match(query, MatchMode::All), (std::vector<std::size_t>{0}));
+    const auto result = index.search(query, 1);
+    EXPECT_EQ(result.total, 2);
+    ASSERT_EQ(result.hits.size(), 1);
+    EXPECT_EQ(result.hits.front().document, 0);
+    EXPECT_NEAR(result.hits.front().score, 1.0, 1e-12);
+}
+
+TEST(Index, CountsQueryTermsOnBothSidesOfANullByte) {
+    using namespace std::string_view_literals;
+    const Index index({{"blue", "", "red blue blue"}, {"red", "", "red red blue"},
+                       {"single", "", "red"}});
+    const auto query = "RED\0blue\0BLUE"sv;
+    EXPECT_EQ(index.match(query, MatchMode::All), (std::vector<std::size_t>{0, 1}));
+    const auto result = index.search(query, 1, MatchMode::All);
+    EXPECT_EQ(result.total, 2);
+    ASSERT_EQ(result.hits.size(), 1);
+    EXPECT_EQ(result.hits.front().document, 0);
+    EXPECT_NEAR(result.hits.front().score, 1.0, 1e-12);
+    EXPECT_TRUE(index.search("red\0absent"sv, 1, MatchMode::All).hits.empty());
+}
+
+TEST(Index, AppliesTheLimitAfterFilteringForAllTerms) {
+    const Index index({{"partial", "", "alpha"}, {"both", "", "alpha beta"},
+                       {"longer", "", "alpha beta extra words"}});
+    const auto query = "alpha alpha alpha alpha alpha alpha alpha alpha beta";
+    const auto any = index.search(query, 1, MatchMode::Any);
+    const auto all = index.search(query, 1, MatchMode::All);
+    ASSERT_EQ(any.hits.size(), 1);
+    ASSERT_EQ(all.hits.size(), 1);
+    EXPECT_EQ(any.total, 3);
+    EXPECT_EQ(all.total, 2);
+    EXPECT_EQ(any.hits.front().document, 0);
+    EXPECT_EQ(all.hits.front().document, 1);
+    EXPECT_GT(any.hits.front().score, all.hits.front().score);
+}
+
+TEST(Index, IncludesDocumentsWithoutWordsInTheIdfPopulation) {
+    const Index index({{"body", "", "alpha beta"}, {"other", "", "alpha"},
+                       {"empty", "", ""}, {"symbols", "", "!!!"}});
+    const auto result = index.search("beta");
+    ASSERT_EQ(result.hits.size(), 1);
+    EXPECT_EQ(result.total, 1);
+    EXPECT_EQ(result.hits.front().document, 0);
+    const double alpha = 1.0 + std::log(5.0 / 3.0);
+    const double beta = 1.0 + std::log(5.0 / 2.0);
+    EXPECT_NEAR(result.hits.front().score, beta / std::hypot(alpha, beta), 1e-12);
+}

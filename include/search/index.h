@@ -48,6 +48,8 @@ private:
         double idf = 0;
     };
 
+    std::vector<std::size_t> matchWords(const std::vector<std::string>& words, MatchMode mode) const;
+
     std::vector<Document> documents_;
     std::unordered_map<std::string, std::size_t> document_ids_;
     std::unordered_map<std::string, Term> terms_;

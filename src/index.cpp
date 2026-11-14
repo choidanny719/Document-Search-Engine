@@ -11,6 +11,14 @@
 
 namespace search {
 
+namespace {
+
+double termFrequencyWeight(std::size_t count) {
+    return 1.0 + std::log(static_cast<double>(count));
+}
+
+}
+
 Index::Index(std::vector<Document> documents)
     : documents_(std::move(documents)), norms_(documents_.size(), 0) {
     for (std::size_t id = 0; id < documents_.size(); ++id) {
@@ -24,7 +32,7 @@ Index::Index(std::vector<Document> documents)
             ++counts[word];
         }
         for (const auto& [word, count] : counts) {
-            terms_[word].postings.push_back({id, 1.0 + std::log(static_cast<double>(count))});
+            terms_[word].postings.push_back({id, termFrequencyWeight(count)});
         }
     }
 
@@ -41,7 +49,10 @@ Index::Index(std::vector<Document> documents)
 }
 
 std::vector<std::size_t> Index::match(std::string_view query, MatchMode mode) const {
-    const auto words = tokenize(query);
+    return matchWords(tokenize(query), mode);
+}
+
+std::vector<std::size_t> Index::matchWords(const std::vector<std::string>& words, MatchMode mode) const {
     const std::unordered_set<std::string> unique(words.begin(), words.end());
     std::vector<const Term*> entries;
 
@@ -89,13 +100,14 @@ SearchResults Index::search(std::string_view query, std::size_t limit, MatchMode
     if (limit == 0) {
         throw std::invalid_argument("Result limit must be positive");
     }
-    const auto candidates = match(query, mode);
+    const auto words = tokenize(query);
+    const auto candidates = matchWords(words, mode);
     if (candidates.empty()) {
         return {0, {}};
     }
 
     std::map<std::string, std::size_t> counts;
-    for (const auto& word : tokenize(query)) {
+    for (const auto& word : words) {
         ++counts[word];
     }
     std::unordered_map<std::size_t, double> scores;
@@ -106,7 +118,7 @@ SearchResults Index::search(std::string_view query, std::size_t limit, MatchMode
             continue;
         }
         const auto& term = found->second;
-        const double weight = (1.0 + std::log(static_cast<double>(count))) * term.idf;
+        const double weight = termFrequencyWeight(count) * term.idf;
         query_norm += weight * weight;
         for (const auto& posting : term.postings) {
             scores[posting.document] += weight * posting.weight;
