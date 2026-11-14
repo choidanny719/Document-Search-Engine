@@ -339,6 +339,53 @@ class ApiBoundaryTest(ServerTestCase):
                 self.assertEqual(body['results'][0]['preview'], preview)
 
 
+class RankedDocumentsApiTest(ServerTestCase):
+    documents = {
+        'archive/team-notes.md': 'oak ash oak',
+        'current/team_notes.txt': 'OAK, oak; ASH!',
+        'solo.txt': 'oak',
+        'z/exact.md': 'oak ash',
+    }
+
+    def test_limit_splits_a_tie_below_the_best_match(self):
+        expected = ['z/exact.md', 'archive/team-notes.md', 'current/team_notes.txt']
+        for limit in [1, 2, 3]:
+            with self.subTest(limit=limit):
+                status, body, _ = self.search(q='oak ash', mode='all', limit=limit)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['total'], 3)
+                self.assertEqual([hit['id'] for hit in body['results']], expected[:limit])
+                self.assertAlmostEqual(body['results'][0]['score'], 1.0)
+
+    def test_repeated_terms_change_the_best_match_without_adding_hits(self):
+        query = 'ASH/OAK oak'
+        status, body, _ = self.search(q=query, mode='any', limit=1)
+        self.assertEqual(status, 200)
+        self.assertEqual(body['total'], 4)
+        best, = body['results']
+        self.assertEqual(best['id'], 'archive/team-notes.md')
+        self.assertAlmostEqual(best['score'], 1.0)
+        for mode, total, hits in [('any', 4, [best]), ('all', 0, [])]:
+            with self.subTest(mode=mode):
+                status, body, _ = self.search(q=query + ' spruce', mode=mode, limit=1)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['total'], total)
+                self.assertEqual(body['results'], hits)
+
+    def test_same_title_hits_retrieve_their_own_contents(self):
+        status, body, _ = self.search(q='oak oak ash', mode='all', limit=2)
+        self.assertEqual(status, 200)
+        hits = body['results']
+        self.assertEqual([hit['title'] for hit in hits], ['team notes', 'team notes'])
+        self.assertEqual([hit['id'] for hit in hits],
+                         ['archive/team-notes.md', 'current/team_notes.txt'])
+        for hit in hits:
+            with self.subTest(identifier=hit['id']):
+                path = '/document?' + urllib.parse.urlencode({'id': hit['id']})
+                self.assertEqual(self.request(path)[:2], (200, self.documents[hit['id']]))
+                self.assertEqual(hit['preview'], self.documents[hit['id']])
+
+
 class CorpusSnapshotApiTest(ServerTestCase):
     documents = {'kept.txt': 'original snapshot', 'deleted.txt': 'retained content'}
 

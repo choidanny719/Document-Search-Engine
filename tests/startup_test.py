@@ -140,6 +140,31 @@ class StartupTest(unittest.TestCase):
             self.assertEqual(result['total'], 2)
             self.assertEqual({hit['id'] for hit in result['results']}, {'example.txt', 'added.md'})
 
+    def test_restart_reweights_terms_when_only_another_document_changes(self):
+        (self.data / 'example.txt').write_text('ash', encoding='utf-8')
+        (self.data / 'oak.md').write_text('oak', encoding='utf-8')
+        context = self.data / 'context.txt'
+        context.write_text('oak oak oak', encoding='utf-8')
+
+        def best(server):
+            status, body, _ = server.request('/search?q=oak+ash&limit=1')
+            self.assertEqual(status, 200)
+            self.assertEqual(body['total'], 3)
+            hit, = body['results']
+            return hit['id'], hit['score']
+
+        with Server(self.data, sys.argv[2]) as server:
+            first_id, first_score = best(server)
+            self.assertEqual(first_id, 'example.txt')
+            context.write_text('ash ash ash', encoding='utf-8')
+            self.assertEqual(best(server), (first_id, first_score))
+        with Server(self.data, sys.argv[2]) as restarted:
+            second_id, second_score = best(restarted)
+            self.assertEqual(second_id, 'oak.md')
+            self.assertAlmostEqual(second_score, first_score)
+            self.assertEqual(restarted.request('/document?id=context.txt')[:2],
+                             (200, 'ash ash ash'))
+
     def test_servers_keep_separate_corpora_and_lifetimes(self):
         other = self.root / 'other'
         other.mkdir()
