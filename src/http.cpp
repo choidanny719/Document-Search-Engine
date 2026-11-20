@@ -37,6 +37,34 @@ std::string preview(std::string_view text) {
     return result;
 }
 
+struct SearchRequest {
+    std::string query;
+    std::string mode;
+    int limit = 10;
+};
+
+SearchRequest parseSearchRequest(const httplib::Request& request) {
+    SearchRequest parsed;
+    parsed.query = request.get_param_value("q");
+    if (parsed.query.size() > 512 || search::tokenize(parsed.query).empty()) {
+        throw std::invalid_argument("q must contain a word and be at most 512 bytes");
+    }
+
+    parsed.mode = request.has_param("mode") ? request.get_param_value("mode") : "any";
+    if (parsed.mode != "any" && parsed.mode != "all") {
+        throw std::invalid_argument("mode must be any or all");
+    }
+
+    try {
+        if (request.has_param("limit")) {
+            parsed.limit = parseNumber(request.get_param_value("limit"), 1, 100);
+        }
+    } catch (const std::invalid_argument&) {
+        throw std::invalid_argument("limit must be an integer between 1 and 100");
+    }
+    return parsed;
+}
+
 }
 
 int parseNumber(std::string_view value, int minimum, int maximum) {
@@ -61,27 +89,14 @@ void addRoutes(httplib::Server& server, const search::Index& index, const std::s
     });
 
     server.Get("/search", [&index](const auto& request, auto& response) {
-        const auto query = request.get_param_value("q");
-        if (query.size() > 512 || search::tokenize(query).empty()) {
-            sendJson(response, {{"error", "q must contain a word and be at most 512 bytes"}}, 400);
-            return;
-        }
-
-        const auto mode = request.has_param("mode") ? request.get_param_value("mode") : "any";
-        if (mode != "any" && mode != "all") {
-            sendJson(response, {{"error", "mode must be any or all"}}, 400);
-            return;
-        }
-
-        int limit = 10;
+        SearchRequest parsed;
         try {
-            if (request.has_param("limit")) {
-                limit = parseNumber(request.get_param_value("limit"), 1, 100);
-            }
-        } catch (const std::invalid_argument&) {
-            sendJson(response, {{"error", "limit must be an integer between 1 and 100"}}, 400);
+            parsed = parseSearchRequest(request);
+        } catch (const std::invalid_argument& error) {
+            sendJson(response, {{"error", error.what()}}, 400);
             return;
         }
+        const auto& [query, mode, limit] = parsed;
 
         const auto start = std::chrono::steady_clock::now();
         const auto results = index.search(query, limit,
