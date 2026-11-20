@@ -48,12 +48,59 @@ class ApiTest(ServerTestCase):
         cases = [{}, {'q': ''}, {'q': '!!!'}, {'q': 'a' * 513},
                  {'q': 'database', 'mode': 'none'}]
         cases.extend({'q': 'database', 'limit': value}
-                     for value in ['', '0', '-1', '101', 'abc', '1x', '999999999999999'])
+                     for value in ['', '0', '-1', '101', 'abc', '1x', '2147483647', '2147483648',
+                                   '-2147483648', '-2147483649', '999999999999999'])
         for parameters in cases:
             with self.subTest(parameters=parameters):
                 status, body, _ = self.search(**parameters)
                 self.assertEqual(status, 400)
                 self.assertIn('error', body)
+
+    def test_embedded_nulls_separate_words_without_truncating_the_query(self):
+        for query, mode, total in [
+            ('database\x00locking', 'all', 1),
+            ('database\x00absent', 'any', 2),
+            ('database\x00absent', 'all', 0),
+            ('\x00database\x00', 'all', 2),
+        ]:
+            with self.subTest(query=query, mode=mode):
+                status, body, _ = self.search(q=query, mode=mode)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['query'], query)
+                self.assertEqual(body['mode'], mode)
+                self.assertEqual(body['total'], total)
+                _, expected, _ = self.search(q=query.replace('\x00', ' '), mode=mode)
+                self.assertEqual(body['results'], expected['results'])
+
+    def test_encoded_query_separators_do_not_change_mode_or_limit(self):
+        _, expected, _ = self.search(q='database', mode='any', limit=1)
+        for query in [
+            'database&mode=all&limit=0',
+            'database?mode=all&limit=0',
+            'database#mode=all&limit=0',
+        ]:
+            with self.subTest(query=query):
+                status, body, _ = self.search(q=query, mode='any', limit=1)
+                self.assertEqual(status, 200)
+                self.assertEqual(body['query'], query)
+                self.assertEqual(body['mode'], 'any')
+                self.assertEqual(body['total'], 2)
+                self.assertEqual(body['results'], expected['results'])
+
+    def test_search_parameters_are_percent_decoded_once(self):
+        cases = [
+            ('database%20locking', 'database locking', 1),
+            ('database%2520locking', 'database%20locking', 0),
+            ('database%2Blocking', 'database+locking', 1),
+            ('database%252Blocking', 'database%2Blocking', 0),
+        ]
+        for encoded, decoded, total in cases:
+            with self.subTest(encoded=encoded):
+                status, body, _ = self.request('/search?q=' + encoded + '&mode=all')
+                self.assertEqual(status, 200)
+                self.assertEqual(body['query'], decoded)
+                self.assertEqual(body['total'], total)
+                self.assertEqual(len(body['results']), total)
 
     def test_document_lookup_does_not_read_arbitrary_paths(self):
         status, body, _ = self.request('/document?id=a.txt')
